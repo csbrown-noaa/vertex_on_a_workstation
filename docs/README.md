@@ -1,10 +1,9 @@
-# repo name
+# Vertex Custom Model Training on a Workstation
 
-Describe your project here
+Scripts to bridge running a VertexAI compatible custom model on a workstation.
 
 # Installation
 
-Put installation instructions here
 
 # Contributing
 
