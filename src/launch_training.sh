@@ -5,48 +5,58 @@ set -e
 
 # --- CLI Argument Parsing ---
 usage() {
-    echo "Usage: $0 [OPTIONS]"
+    echo "Usage: $0 [OPTIONS] -- [CONTAINER_ARGS...]"
     echo "Automates launching a GCP Workstation and running a training job over SSH."
     echo ""
     echo "Options:"
-    echo "  -b, --bucket    REQUIRED: GCS bucket for the training job (e.g., my-training-bucket)"
-    echo "  -i, --image     REQUIRED: Docker image URI for the training job"
-    echo "  -n, --name      Workstation name (default: megamodel_training)"
-    echo "  -p, --project   GCP Project ID (default: ggn-nmfs-osi-dev-1)"
-    echo "  -r, --region    GCP Region (default: us-central1)"
-    echo "  -c, --cluster   Workstation cluster (default: workstation-cluster-1)"
-    echo "  -g, --config    Workstation config (default: nmfs-base-image-xlarge-gpu-base-image)"
-    echo "  -h, --help      Display this help message and exit"
+    echo "  -b, --bucket         REQUIRED: GCS bucket for the training job (e.g., my-training-bucket)"
+    echo "  -i, --image          REQUIRED: Docker image URI for the training job"
+    echo "  -a, --aip-model-dir  REQUIRED: Vertex AI model directory URI (e.g., gs://my-bucket/model_output)"
+    echo "  -n, --name           REQUIRED: Workstation name"
+    echo "  -p, --project        REQUIRED: GCP Project ID"
+    echo "  -r, --region         REQUIRED: GCP Region"
+    echo "  -c, --cluster        REQUIRED: Workstation cluster"
+    echo "  -g, --config         REQUIRED: Workstation config"
+    echo "  -h, --help           Display this help message and exit"
+    echo ""
+    echo "Container Arguments:"
+    echo "  Any arguments placed after a double dash (--) will be passed directly"
+    echo "  to the Docker container."
     exit 1
 }
 
-# Default Configuration variables
-WORKSTATION_NAME="megamodel_training"
-PROJECT="ggn-nmfs-osi-dev-1"
-REGION="us-central1"
-CLUSTER="workstation-cluster-1"
-CONFIG="nmfs-base-image-xlarge-gpu-base-image"
+# Initialize variables to empty strings (no defaults)
+WORKSTATION_NAME=""
+PROJECT=""
+REGION=""
+CLUSTER=""
+CONFIG=""
 GCS_BUCKET=""
 IMAGE_URI=""
+AIP_MODEL_DIR=""
+CONTAINER_ARGS=()
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         -b|--bucket) GCS_BUCKET="$2"; shift ;;
         -i|--image) IMAGE_URI="$2"; shift ;;
+        -a|--aip-model-dir) AIP_MODEL_DIR="$2"; shift ;;
         -n|--name) WORKSTATION_NAME="$2"; shift ;;
         -p|--project) PROJECT="$2"; shift ;;
         -r|--region) REGION="$2"; shift ;;
         -c|--cluster) CLUSTER="$2"; shift ;;
         -g|--config) CONFIG="$2"; shift ;;
         -h|--help) usage ;;
+        --) shift; CONTAINER_ARGS=("$@"); break ;;
+        -*) echo "Unknown parameter passed: $1"; usage ;;
         *) echo "Unknown parameter passed: $1"; usage ;;
     esac
     shift
 done
 
-# Validation
-if [[ -z "$GCS_BUCKET" || -z "$IMAGE_URI" ]]; then
-    echo "Error: --bucket and --image are required for the remote training script."
+# Validation: Ensure all arguments are provided
+if [[ -z "$GCS_BUCKET" || -z "$IMAGE_URI" || -z "$AIP_MODEL_DIR" || -z "$WORKSTATION_NAME" || -z "$PROJECT" || -z "$REGION" || -z "$CLUSTER" || -z "$CONFIG" ]]; then
+    echo "Error: Missing required arguments. All options must be specified."
     usage
 fi
 
@@ -84,17 +94,20 @@ gcloud_ssh() {
     --command="$cmd"
 }
 
-# Helper function to pipe a local script to the workstation AND pass arguments
+# Helper function to pipe a local script to the workstation AND pass arguments securely
 gcloud_ssh_script() {
   local script_file="$1"
-  shift # Remove the script file from the argument list so "$@" only contains the CLI args
+  shift # Remove the script file from the argument list
+  
+  # Safely escape arguments (preserves spaces inside string variables over the SSH hop)
+  local escaped_args=$(printf '%q ' "$@")
   
   gcloud workstations ssh $WORKSTATION_NAME \
     --project=$PROJECT \
     --region=$REGION \
     --cluster=$CLUSTER \
     --config=$CONFIG \
-    --command="bash -s -- $@" < "$script_file"
+    --command="bash -s -- $escaped_args" < "$script_file"
 }
 
 # --- Wait for Readiness ---
@@ -124,8 +137,13 @@ fi
 # --- Run the "Vertex" Job ---
 echo "Workstation ready. Launching training job over SSH..."
 
-# We call the script over SSH and pass our CLI variables down to it
-gcloud_ssh_script "run_training_job.sh" --bucket "$GCS_BUCKET" --image "$IMAGE_URI" --region "$REGION"
+# Call the script over SSH, passing workstation args AND appending container args after the --
+gcloud_ssh_script "run_training_job.sh" \
+    --bucket "$GCS_BUCKET" \
+    --image "$IMAGE_URI" \
+    --region "$REGION" \
+    --aip-model-dir "$AIP_MODEL_DIR" \
+    -- "${CONTAINER_ARGS[@]}"
 
 # --- Ephemeral Teardown ---
 echo "Training job completed. Spinning down workstation to save costs..."

@@ -5,21 +5,28 @@ set -e
 
 # --- CLI Argument Parsing ---
 usage() {
-    echo "Usage: $0 [OPTIONS]"
+    echo "Usage: $0 [OPTIONS] -- [CONTAINER_ARGS...]"
     echo "Executes a Vertex AI style training job via Docker on a GCP Workstation."
     echo ""
     echo "Options:"
-    echo "  -b, --bucket    REQUIRED: GCS bucket name for FUSE mount (e.g., my-training-bucket)"
-    echo "  -i, --image     REQUIRED: Docker image URI to pull and run"
-    echo "  -r, --region    GCP Region for Artifact Registry auth (default: us-central1)"
-    echo "  -h, --help      Display this help message and exit"
+    echo "  -b, --bucket         REQUIRED: GCS bucket name for FUSE mount (e.g., my-training-bucket)"
+    echo "  -i, --image          REQUIRED: Docker image URI to pull and run"
+    echo "  -r, --region         REQUIRED: GCP Region for Artifact Registry auth"
+    echo "  -a, --aip-model-dir  REQUIRED: Vertex AI model directory URI (e.g., gs://my-bucket/model_output)"
+    echo "  -h, --help           Display this help message and exit"
+    echo ""
+    echo "Container Arguments:"
+    echo "  Any arguments placed after a double dash (--) will be passed directly"
+    echo "  to the Docker container as command-line arguments."
     exit 1
 }
 
-# Default values
-REGION="us-central1"
+# Initialize variables to empty strings (no defaults)
+REGION=""
 GCS_BUCKET=""
 IMAGE_URI=""
+AIP_MODEL_DIR=""
+CONTAINER_ARGS=()
 
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do
@@ -27,15 +34,18 @@ while [[ "$#" -gt 0 ]]; do
         -b|--bucket) GCS_BUCKET="$2"; shift ;;
         -i|--image) IMAGE_URI="$2"; shift ;;
         -r|--region) REGION="$2"; shift ;;
+        -a|--aip-model-dir) AIP_MODEL_DIR="$2"; shift ;;
         -h|--help) usage ;;
+        --) shift; CONTAINER_ARGS=("$@"); break ;;
+        -*) echo "Unknown parameter passed: $1"; usage ;;
         *) echo "Unknown parameter passed: $1"; usage ;;
     esac
     shift
 done
 
 # Validate required arguments
-if [[ -z "$GCS_BUCKET" \vert{}\vert{} -z "$IMAGE_URI" ]]; then
-    echo "Error: Missing required arguments."
+if [[ -z "$GCS_BUCKET" \vert{}\vert{} -z "$IMAGE_URI" || -z "$REGION" \vert{}\vert{} -z "$AIP_MODEL_DIR" ]]; then
+    echo "Error: Missing required arguments. All options must be specified."
     usage
 fi
 
@@ -72,14 +82,13 @@ gcsfuse $GCS_BUCKET$LOCAL_MOUNT
 echo "Starting Docker container..."
 
 # We bind mount the local FUSE folder to the EXACT path Vertex AI uses: /gcs/BUCKET_NAME
-# This ensures that when utils.py converts gs://... to /gcs/..., it works seamlessly.
+# The CONTAINER_ARGS array safely expands to any arguments the user passed after '--'
 docker run --rm --gpus all \
     --shm-size=8g \
     -v $LOCAL_MOUNT:/gcs/$GCS_BUCKET \
-    -e AIP_MODEL_DIR=gs://$GCS_BUCKET/model_output \
+    -e AIP_MODEL_DIR="$AIP_MODEL_DIR" \
     $IMAGE_URI \
-    --config-uri gs://$GCS_BUCKET/config.yaml \
-    --model yolov8n.pt
+    "${CONTAINER_ARGS[@]}"
 
 # --- Cleanup ---
 echo "Docker container finished. Unmounting FUSE..."
